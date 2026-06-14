@@ -1,0 +1,33 @@
+{
+  "name": "ti-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-powered threat intelligence briefing tool — fetches real RSS/Atom feeds, analyzes with Claude, exports with clickable citations.",
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "server": "node server.js"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "express": "^5.0.0",
+    "cors": "^2.8.5",
+    "node-fetch": "^2.7.0",
+    "better-sqlite3": "^9.4.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}

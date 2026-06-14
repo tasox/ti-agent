@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Database — never commit user data
+ti-agent.db
+ti-agent.db-shm
+ti-agent.db-wal
+*.db
+
+# Environment / secrets — never commit API keys
+.env
+.env.local
+.env.*.local
+
+# Production build
+/build
+/dist
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Exported config snapshots (contain feed lists, may contain personal preferences)
+ti-agent-config-*.json
+
+# Misc CRA
+.eslintcache
