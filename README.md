@@ -4,6 +4,8 @@ TI Agent is a full-stack local application that fetches real security articles f
 
 Unlike tools that prompt an LLM with feed URLs and hope for the best, TI Agent actually fetches and parses the feeds server-side, filters articles to your chosen date window, and sends the real content to Claude. Every claim in the report traces to a specific article, and every `[N]` citation is a clickable link to that article's URL.
 
+![alt text](ti-agent.png)
+
 ---
 
 ## Features
@@ -169,6 +171,8 @@ This installs `react`, `react-dom`, `react-scripts`, `express@5`, `cors`, `node-
 
 ## Running
 
+![alt text](step1andstep2.png)
+
 Open two terminal windows in the project directory:
 
 ```bash
@@ -184,11 +188,13 @@ You should see:
 
 ✅  TI Agent server → http://localhost:3001
 ```
+![alt text](step1.png)
 
 ```bash
 # Terminal 2 — frontend (port 3000)
 npm start
 ```
+![alt text](step2.png)
 
 Open **http://localhost:3000** in your browser.
 
@@ -204,6 +210,7 @@ Open **http://localhost:3000** in your browser.
 The button label will cycle through two phases:
 - `◌ FETCHING N FEEDS…` — downloading and parsing RSS/Atom feeds
 - `◌ ANALYZING WITH AI…` — Claude processing the articles
+
 
 ---
 
