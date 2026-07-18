@@ -4,6 +4,8 @@ TI Agent is a full-stack local application that fetches real security articles f
 
 Unlike tools that prompt an LLM with feed URLs and hope for the best, TI Agent actually fetches and parses the feeds server-side, filters articles to your chosen date window, and sends the real content to Claude. Every claim in the report traces to a specific article, and every `[N]` citation is a clickable link to that article's URL.
 
+Beyond briefings, the **Hunt** tab turns any saved report into structured, citation-grounded threat hunting hypotheses and merges a selection into one consolidated, filterable HTML dashboard — usable with either a metered API key or a local Claude Code (subscription) login.
+
 ![alt text](ti-agent.png)
 
 ---
@@ -15,10 +17,13 @@ Unlike tools that prompt an LLM with feed URLs and hope for the best, TI Agent a
 - **Inline citations** — every factual claim in the report is followed by `[N]` badges linking to the source article
 - **Authoritative references section** — rebuilt from the actual source map after generation, guaranteeing completeness and no duplicates
 - **4 export formats** — Markdown (with hyperlinked citations), HTML, PDF (dark theme, print-ready), DOCX (proper ZIP-based `.docx`)
+- **Bulk report export** — select one, several, or all saved reports in the History tab and export them together in a single chosen format
+- **Threat hunting hypotheses** — derive structured, citation-grounded hunting hypotheses from any saved report and merge a selection into one consolidated, filterable interactive HTML dashboard (light or dark theme)
+- **Claude subscription auth** — extract hypotheses via a local, logged-in Claude Code CLI instead of a metered API key, with no extra setup beyond `claude login`
 - **Cost tracking & forecasting** — per-run token usage, actual vs. estimated cost accuracy, 30-day budget projections
-- **Full persistence** — all reports, config, and custom feeds saved to SQLite; survive server restarts
+- **Full persistence** — all reports, hypotheses, config, and custom feeds saved to SQLite; survive server restarts
 - **Custom feeds** — add any RSS/Atom feed URL with a name and category
-- **Feed management** — enable, disable, or permanently delete any feed (builtin or custom)
+- **Feed management** — enable, disable, rename/re-point, or permanently delete any feed (builtin or custom)
 - **Config export/import** — snapshot and restore your entire configuration as JSON
 - **4 Claude models** — Haiku 4.5 (default), Sonnet 4.5, Sonnet 4.6, Opus 4.5
 
@@ -86,14 +91,61 @@ Every report follows this structure:
 
 ---
 
+## Hunting Hypotheses
+
+The **🎯 HUNT** tab turns already-saved reports into structured, actionable threat hunting hypotheses, then merges a selection of them into one consolidated interactive HTML dashboard — separate from the narrative briefing export above.
+
+### How it works
+
+1. Go to the **HUNT** tab and select one or more saved reports (checkboxes — no prior extraction required).
+2. Click **⚡ GENERATE CONSOLIDATED HTML**. This single action:
+   - Extracts hypotheses for any selected report that doesn't have them yet (skips ones that are already extracted, unless you check **re-extract already processed**).
+   - Merges every selected report's hypotheses — across however many different briefing windows — into one downloadable HTML file, with category and briefing-window filters, expandable cards, and summary counters.
+3. The downloaded file is fully self-contained (inline CSS/JS, no external dependencies) and safe to share or archive on its own.
+
+Each hypothesis is grounded only in its source report's own cited content — the extraction prompt is instructed not to introduce outside knowledge, and every `[N]` citation token is resolved against that report's own source map, so reference links can never be hallucinated.
+
+### Auth modes
+
+| Mode | How it works | Cost |
+|------|--------------|------|
+| **API Key** *(default)* | Uses the same Anthropic API key configured in the CONFIG tab | Metered, billed per token |
+| **Claude Subscription** | Shells out to a local, already-logged-in Claude Code CLI (`claude -p`) | Uses your Claude Pro/Max subscription — no API billing, no key needed |
+
+Claude Subscription mode requires the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) installed and authenticated once via `claude login` (run manually in any terminal — TI Agent never runs this for you, since it's an interactive browser-based login). See [Troubleshooting](#troubleshooting) if the server can't find the `claude` binary.
+
+### Hypothesis fields
+
+Each extracted hypothesis has this shape:
+
+| Field | Description |
+|-------|-------------|
+| `priority` | `critical` \| `high` \| `medium` |
+| `category` | `Network` \| `Endpoint` \| `Cloud` \| `Identity` \| `Supply Chain` |
+| `title` | Short one-line hunt title |
+| `hypothesis` | 2-4 sentence hunting rationale, with `[N]` citations preserved |
+| `where` | Systems/logs/environments to look in |
+| `data_sources` | Specific log sources or telemetry types |
+| `query` | Pseudo detection-logic sketch |
+| `mitre` | MITRE ATT&CK technique IDs and names |
+| `iocs` | Specific indicators or artefact patterns to hunt for |
+| `refs` | `{label, url}` pairs resolved from the source report's citations |
+
+### Theme
+
+The consolidated HTML can be generated in **☀ Light** (default, matches the original reference dashboard design) or **🌙 Dark** (matches TI Agent's own dark palette — same severity colors and citation-link styling used elsewhere in the app). Pick a theme with the toggle next to the Generate button before clicking it.
+
+---
+
 ## Requirements
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
 | Node.js | **22.x** | Express 4 breaks on Node 22 — Node 22 required |
 | macOS | 12+ | Tested on macOS; Linux compatible; Windows untested |
-| Anthropic API key | — | `sk-ant-api03-...` format |
+| Anthropic API key | — | `sk-ant-api03-...` format. Required for briefing generation and for the Hunt tab's default API Key mode |
 | Xcode CLI tools | — | Required for `better-sqlite3` native build |
+| Claude Code CLI *(optional)* | — | Only needed for the Hunt tab's **Claude Subscription** auth mode — install it and run `claude login` once. Not required for anything else |
 
 ---
 
@@ -113,8 +165,10 @@ Every report follows this structure:
 | Module | Used for |
 |--------|---------|
 | `path` | Resolving the DB file path relative to `server.js` |
-| `fs` | Startup DB file stat check |
+| `fs` | Startup DB file stat check; locating the Claude CLI binary |
+| `os` | Resolving `$HOME` when searching for the Claude CLI install location |
 | `zlib` | `deflateRawSync` for building valid `.docx` ZIP archives |
+| `child_process` | `execFile`-ing the local Claude Code CLI for Hunt tab subscription auth |
 
 ### Frontend (included in Create React App)
 
@@ -216,7 +270,7 @@ The button label will cycle through two phases:
 
 ## Database
 
-The SQLite database (`ti-agent.db`) is created automatically in the same directory as `server.js` on first run. It contains three tables:
+The SQLite database (`ti-agent.db`) is created automatically in the same directory as `server.js` on first run. It contains four tables:
 
 ### `config`
 Key/value store for all UI preferences. Values are JSON-serialized.
@@ -232,6 +286,7 @@ Key/value store for all UI preferences. Values are JSON-serialized.
 | `customFrom` / `customTo` | `string` | Custom date range (YYYY-MM-DD) |
 | `disabledIds` | `string[]` | Feeds temporarily disabled |
 | `deletedIds` | `string[]` | Feeds permanently removed |
+| `feedOverrides` | `{ [feedId]: {name, url, xmlUrl} }` | Renamed/re-pointed **built-in** feeds — merged onto the hardcoded feed list at render time. Edits to **custom** feeds instead update their `custom_feeds` row directly |
 
 ### `custom_feeds`
 User-added RSS/Atom feeds.
@@ -264,6 +319,25 @@ Generated briefings with full metadata.
 | `source_map` | TEXT | JSON mapping `{"1": {name, url}, ...}` for citations |
 | `created_at` | TEXT | ISO timestamp |
 
+### `hypotheses`
+Extracted threat hunting hypotheses, one row per hypothesis, linked to the report they were derived from. Re-extracting a report deletes and replaces all of its rows.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment |
+| `report_id` | INTEGER | FK to `reports.id` (indexed) |
+| `priority` | TEXT | `critical` \| `high` \| `medium` |
+| `category` | TEXT | `Network` \| `Endpoint` \| `Cloud` \| `Identity` \| `Supply Chain` |
+| `title` | TEXT | Short hunt title |
+| `hypothesis` | TEXT | Hunting rationale, with `[N]` citations |
+| `where_to_look` | TEXT | Systems/logs/environments to search |
+| `data_sources` | TEXT | JSON array of log sources / telemetry types |
+| `query_logic` | TEXT | Pseudo detection-logic sketch |
+| `mitre` | TEXT | JSON array of MITRE ATT&CK technique IDs/names |
+| `iocs` | TEXT | JSON array of indicators/artefact patterns |
+| `refs` | TEXT | JSON array of `{label, url}`, resolved from the source report's citations |
+| `created_at` | TEXT | ISO timestamp |
+
 ### Migrations
 
 The server runs non-destructive migrations at startup. Adding columns to the schema will not break existing databases — the `ALTER TABLE` statements are wrapped in `try/catch` so already-existing columns are silently skipped.
@@ -278,20 +352,26 @@ All endpoints are on `http://localhost:3001`.
 |--------|------|-------------|
 | `GET` | `/health` | Server health check, returns DB path |
 | `POST` | `/api/fetch-feeds` | Fetch and parse RSS/Atom feeds for a date window |
-| `POST` | `/api/analyze` | Proxy to Anthropic `/v1/messages` |
+| `POST` | `/api/analyze` | Proxy to Anthropic `/v1/messages` (API key auth) |
+| `POST` | `/api/analyze-cli` | Proxy to a local Claude Code CLI (subscription auth) — same response shape as `/api/analyze` |
 | `GET` | `/api/config` | Load all saved config |
 | `PUT` | `/api/config` | Save config (API key is always excluded) |
 | `GET` | `/api/config/export` | Download full config + custom feeds as JSON |
 | `POST` | `/api/config/import` | Restore config from exported JSON |
 | `GET` | `/api/feeds/custom` | List custom feeds |
 | `POST` | `/api/feeds/custom` | Add a custom feed |
+| `PUT` | `/api/feeds/custom/:id` | Rename or re-point an existing custom feed |
 | `DELETE` | `/api/feeds/custom/:id` | Remove a custom feed |
 | `GET` | `/api/reports` | List all reports (no body field) |
 | `GET` | `/api/reports/:id` | Get a single report with body |
 | `POST` | `/api/reports` | Save a generated report |
-| `DELETE` | `/api/reports/:id` | Delete a report |
+| `DELETE` | `/api/reports/:id` | Delete a report (cascades to its hypotheses) |
 | `GET` | `/api/costs` | Get cost ledger rows |
 | `GET` | `/api/reports/:id/export?format=` | Export report (md / html / pdf / docx) |
+| `POST` | `/api/reports/:id/hypotheses` | Replace a report's stored hypotheses |
+| `GET` | `/api/reports/:id/hypotheses` | List a report's stored hypotheses |
+| `GET` | `/api/hypotheses/counts` | `{ [report_id]: count }` for every report, in one query |
+| `GET` | `/api/hypotheses/consolidated?reportIds=&theme=` | Consolidated hunting-hypotheses HTML for a set of reports (`theme` = `light` \| `dark`, default `light`) |
 
 ### `POST /api/fetch-feeds`
 
@@ -345,6 +425,15 @@ Feed fetcher behaviour:
 
 All formats automatically rebuild the References section from the stored `source_map` before exporting, guaranteeing that every cited article appears exactly once and no references are missing.
 
+Every export (single report or bulk) is named after that report's own date window:
+```
+threat-intel_report_start-DDMMYYYY_end-DDMMYYYY.<ext>
+```
+
+### Bulk export
+
+The **History** tab lets you select one, several, or all saved reports (checkboxes + an `ALL`/`NONE` toggle) and export them all at once in a single chosen format (MD/HTML/PDF/DOCX). Each selected report downloads as its own file — bulk export doesn't merge reports together, it just triggers one download per report, staggered slightly so browsers don't block them as a popup flood.
+
 ---
 
 ## Supported Claude Models
@@ -389,3 +478,10 @@ In Chrome's print dialog, enable **Background graphics** (More settings → Back
 
 **DOCX opens with "unreadable content" warning**
 This should be fixed in the current version — the DOCX is now a proper ZIP archive. If you still see the warning, you may have an older `server.js`. Ensure you are running the latest version.
+
+**Hunt tab: "Claude CLI not found" even after `claude login`**
+`claude login` persists credentials to disk and isn't tied to any particular terminal, so this is virtually always a `PATH` issue, not an auth issue. Node's `execFile()` never spawns a shell, so it only ever sees the `PATH` the `node server.js` process itself started with — it does **not** read `.zshrc`/`.bash_profile`. If the Claude Code installer added itself to your shell rc file *after* your terminal was already open, that terminal (and anything started from it) won't see it until you open a new one. `server.js` checks a few common install locations (`~/.local/bin`, `~/.claude/local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) automatically and logs which one it resolved at startup:
+```
+🔎  Claude CLI resolved to: /Users/you/.local/bin/claude
+```
+If that line is missing or points to the wrong place, restart `node server.js` from a fresh terminal (Node only reads a file once at startup — editing it or re-logging in doesn't affect an already-running process). Reinstalling the app or its dependencies is never required for this — only a server restart.
