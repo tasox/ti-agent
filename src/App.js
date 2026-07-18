@@ -287,31 +287,93 @@ function buildSourceMap(articles) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HUNTING HYPOTHESES — extraction prompt + response parsing
+// ─────────────────────────────────────────────────────────────────────────────
+const HYPOTHESIS_CATEGORIES = ["Network", "Endpoint", "Cloud", "Identity", "Supply Chain"];
+
+function buildHypothesisPrompt(reportBody) {
+  return `You are a senior threat hunter at a Tier 1 SOC. Below is a threat intelligence briefing that was already produced from cited source articles — each factual claim carries a [N] citation matching the briefing's own reference list.
+
+Your task: read the briefing and derive 3-8 ACTIONABLE THREAT HUNTING HYPOTHESES a hunt team could run against their own telemetry this week. Use ONLY content already present in the briefing below — do not introduce outside knowledge, and do not invent citation numbers that aren't already used in the briefing.
+
+BRIEFING:
+---
+${reportBody}
+---
+
+Respond with STRICT JSON ONLY — a JSON array, no markdown fences, no prose before or after. Each element:
+{
+  "priority": "critical" | "high" | "medium",
+  "category": one of ${JSON.stringify(HYPOTHESIS_CATEGORIES)},
+  "title": "short one-line hunt title",
+  "hypothesis": "2-4 sentences explaining the hunting rationale, keeping any [N] citation tokens from the briefing that support it",
+  "where": "systems/logs/environments to look in",
+  "data_sources": ["specific log source or telemetry type", "..."],
+  "query": "pseudo detection-logic / query sketch, multi-line, // comments allowed",
+  "mitre": ["T#### — Technique name", "..."],
+  "iocs": ["specific indicator or artefact pattern to hunt for", "..."]
+}`;
+}
+
+// Strict-JSON responses sometimes still arrive wrapped in ```json fences — strip before parsing.
+function parseHypothesisResponse(text) {
+  const stripped = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  const parsed = JSON.parse(stripped);
+  if (!Array.isArray(parsed)) throw new Error("Expected a JSON array of hypotheses.");
+  return parsed;
+}
+
+// Resolve [N] citation tokens inside a hypothesis's free-text fields into refs
+// grounded in the report's own sourceMap — never trust URLs the model might invent.
+function resolveHypothesisRefs(hyp, sourceMap) {
+  const text = [hyp.hypothesis, hyp.where, hyp.query].filter(Boolean).join(" ");
+  const nums = [...new Set([...text.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1], 10)))].sort((a, b) => a - b);
+  const refs = nums
+    .map(n => {
+      const src = sourceMap[String(n)];
+      return src ? { label: `[${n}] ${src.name}`, url: src.url } : null;
+    })
+    .filter(Boolean);
+  return { ...hyp, refs };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SUB-COMPONENTS
 // ─────────────────────────────────────────────────────────────────────────────
-function CustomFeedForm({ onAdd, onClose }) {
-  const [name,setName]=useState(""); const [url,setUrl]=useState(""); const [cat,setCat]=useState("Custom"); const [err,setErr]=useState("");
+// Add mode (initial=null): creates a new custom feed with a category.
+// Edit mode (initial={id,name,url}): renames/re-points an existing feed (built-in or custom) — no category field.
+function FeedForm({ initial, onSave, onClose }) {
+  const isEdit = !!initial;
+  const [name,setName]=useState(initial?.name || ""); const [url,setUrl]=useState(initial?.url || ""); const [cat,setCat]=useState("Custom"); const [err,setErr]=useState("");
   const CATS=["Custom","Threat Feeds","Malware","Vulnerabilities","IOCs","Botnet","Phishing","Reports","Framework"];
   const inp={width:"100%",boxSizing:"border-box",background:"#060d14",border:"1px solid #1a3a4a",color:"#c9d8e8",padding:"0.6rem 0.8rem",borderRadius:"5px",fontFamily:"inherit",fontSize:"0.78rem",outline:"none"};
+  const handleSave = () => {
+    if(!name.trim()){setErr("Name required");return;}
+    if (isEdit) onSave({ id: initial.id, name: name.trim(), url: url.trim() });
+    else onSave({id:`custom_${Date.now()}`,name:name.trim(),url:url.trim(),category:cat,color:"#e879f9",isCustom:true});
+    onClose();
+  };
   return (
     <div style={{position:"fixed",inset:0,background:"#000a",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center"}}>
       <div style={{background:"#0a1929",border:"1px solid #e879f933",borderRadius:"10px",padding:"1.8rem",width:"440px",maxWidth:"90vw",boxShadow:"0 0 60px #e879f911"}}>
-        <div style={{color:"#e879f9",fontSize:"0.85rem",letterSpacing:"0.12em",marginBottom:"1.4rem"}}>✦ ADD CUSTOM FEED</div>
+        <div style={{color:"#e879f9",fontSize:"0.85rem",letterSpacing:"0.12em",marginBottom:"1.4rem"}}>{isEdit ? "✎ EDIT FEED" : "✦ ADD CUSTOM FEED"}</div>
         <div style={{marginBottom:"1rem"}}>
           <div style={{color:"#4a6a80",fontSize:"0.65rem",letterSpacing:"0.15em",marginBottom:"0.4rem"}}>FEED NAME *</div>
           <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Internal MISP, FS-ISAC..." style={inp}/>
         </div>
-        <div style={{marginBottom:"1rem"}}>
-          <div style={{color:"#4a6a80",fontSize:"0.65rem",letterSpacing:"0.15em",marginBottom:"0.4rem"}}>URL / ENDPOINT <span style={{opacity:0.5}}>(optional)</span></div>
+        <div style={{marginBottom:isEdit?"1.4rem":"1rem"}}>
+          <div style={{color:"#4a6a80",fontSize:"0.65rem",letterSpacing:"0.15em",marginBottom:"0.4rem"}}>URL / ENDPOINT {!isEdit && <span style={{opacity:0.5}}>(optional)</span>}</div>
           <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://..." style={inp}/>
         </div>
-        <div style={{marginBottom:"1.4rem"}}>
-          <div style={{color:"#4a6a80",fontSize:"0.65rem",letterSpacing:"0.15em",marginBottom:"0.4rem"}}>CATEGORY</div>
-          <select value={cat} onChange={e=>setCat(e.target.value)} style={inp}>{CATS.map(c=><option key={c}>{c}</option>)}</select>
-        </div>
+        {!isEdit && (
+          <div style={{marginBottom:"1.4rem"}}>
+            <div style={{color:"#4a6a80",fontSize:"0.65rem",letterSpacing:"0.15em",marginBottom:"0.4rem"}}>CATEGORY</div>
+            <select value={cat} onChange={e=>setCat(e.target.value)} style={inp}>{CATS.map(c=><option key={c}>{c}</option>)}</select>
+          </div>
+        )}
         {err&&<div style={{color:"#ef5350",fontSize:"0.72rem",marginBottom:"1rem"}}>{"⚠"} {err}</div>}
         <div style={{display:"flex",gap:"0.8rem"}}>
-          <button onClick={()=>{if(!name.trim()){setErr("Name required");return;}onAdd({id:`custom_${Date.now()}`,name:name.trim(),url:url.trim(),category:cat,color:"#e879f9",isCustom:true});onClose();}} style={{flex:1,padding:"0.7rem",background:"#e879f922",border:"1px solid #e879f9",color:"#e879f9",borderRadius:"5px",cursor:"pointer",fontFamily:"inherit",fontSize:"0.78rem",fontWeight:700}}>✦ ADD FEED</button>
+          <button onClick={handleSave} style={{flex:1,padding:"0.7rem",background:"#e879f922",border:"1px solid #e879f9",color:"#e879f9",borderRadius:"5px",cursor:"pointer",fontFamily:"inherit",fontSize:"0.78rem",fontWeight:700}}>{isEdit ? "✎ SAVE CHANGES" : "✦ ADD FEED"}</button>
           <button onClick={onClose} style={{padding:"0.7rem 1.2rem",background:"transparent",border:"1px solid #1a3a4a",color:"#4a6a80",borderRadius:"5px",cursor:"pointer",fontFamily:"inherit",fontSize:"0.78rem"}}>CANCEL</button>
         </div>
       </div>
@@ -826,11 +888,27 @@ export default function App() {
   const [dbError, setDbError]       = useState("");
   const [disabledIds, setDisabledIds] = useState([]);
   const [deletedIds,  setDeletedIds]  = useState([]);
+  const [feedOverrides, setFeedOverrides] = useState({}); // { [builtinFeedId]: {name,url,xmlUrl} }
+  const [editingFeed, setEditingFeed] = useState(null);    // {id,name,url} | null
   const [maxTokens, setMaxTokens]     = useState(2048);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [sourceMap, setSourceMap] = useState({}); // { "1": {name, url}, ... } for current report
   const [customTokens, setCustomTokens] = useState("");
   const reportRef = useRef(null);
+
+  // ── Hunting hypotheses ──────────────────────────────────────────────────────
+  const [huntSelected, setHuntSelected] = useState([]);   // report ids picked for consolidation
+  const [hypCounts, setHypCounts]       = useState({});   // { reportId: extractedCount }
+  const [huntBusy, setHuntBusy]         = useState(null); // report id currently being extracted
+  const [huntError, setHuntError]       = useState("");
+  const [huntAuthMode, setHuntAuthMode] = useState("apikey"); // "apikey" | "subscription"
+  const [huntGenerating, setHuntGenerating] = useState(false);     // batch extract+generate in progress
+  const [huntForceReextract, setHuntForceReextract] = useState(false); // re-run extraction even if already done
+  const [huntTheme, setHuntTheme] = useState("light"); // "light" | "dark" — consolidated HTML palette
+
+  // ── History bulk export ─────────────────────────────────────────────────────
+  const [historySelected, setHistorySelected] = useState([]);       // report ids picked for export
+  const [historyExportFmt, setHistoryExportFmt] = useState("md");   // "md" | "html" | "pdf" | "docx"
 
   // ── Startup: load everything from DB ──────────────────────────────────────
   useEffect(() => {
@@ -856,6 +934,7 @@ export default function App() {
         if (cfg.customTo)                   setCustomTo(cfg.customTo);
         if (cfg.deletedIds)                 setDeletedIds(cfg.deletedIds);
         if (cfg.disabledIds)                setDisabledIds(cfg.disabledIds);
+        if (cfg.feedOverrides)               setFeedOverrides(cfg.feedOverrides);
       } catch(e) { console.warn("Config load failed:", e.message); }
 
       try {
@@ -891,6 +970,11 @@ export default function App() {
         }
       } catch(e) { console.warn("Costs load failed:", e.message); }
 
+      try {
+        const counts = await fetch("http://localhost:3001/api/hypotheses/counts").then(r=>r.json()).catch(()=>({}));
+        if (counts && typeof counts === "object") setHypCounts(counts);
+      } catch(e) { console.warn("Hypothesis counts load failed:", e.message); }
+
       setDbLoaded(true);
     };
     load();
@@ -904,14 +988,16 @@ export default function App() {
       fetch("http://localhost:3001/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selectedIds, selectedModelId, query, schedule, maxTokens, datePreset, customFrom, customTo, disabledIds, deletedIds })
+        body: JSON.stringify({ selectedIds, selectedModelId, query, schedule, maxTokens, datePreset, customFrom, customTo, disabledIds, deletedIds, feedOverrides })
       }).catch(e => console.warn("Config save failed:", e.message));
     }, 600);
     return () => clearTimeout(t);
-  }, [dbLoaded, selectedIds, selectedModelId, query, schedule, maxTokens, datePreset, customFrom, customTo, disabledIds, deletedIds]); // eslint-disable-line
+  }, [dbLoaded, selectedIds, selectedModelId, query, schedule, maxTokens, datePreset, customFrom, customTo, disabledIds, deletedIds, feedOverrides]); // eslint-disable-line
 
   // Derived
-  const allFeeds      = [...BUILTIN_FEEDS, ...customFeeds].filter(f => !deletedIds.includes(f.id));
+  const allFeeds      = [...BUILTIN_FEEDS, ...customFeeds]
+    .filter(f => !deletedIds.includes(f.id))
+    .map(f => feedOverrides[f.id] ? { ...f, ...feedOverrides[f.id] } : f);
   const isCustom      = DATE_PRESETS[datePreset].days === null;
   const dateFrom      = isCustom ? customFrom : subtractDays(DATE_PRESETS[datePreset].days);
   const dateTo        = isCustom ? customTo : today;
@@ -947,6 +1033,21 @@ export default function App() {
     setSelectedIds(p=>p.filter(x=>x!==id));
     setDisabledIds(p=>p.filter(x=>x!==id));
   };
+
+  // Custom feeds are edited in place on their DB row; built-in feeds get a
+  // per-id override merged onto BUILTIN_FEEDS (persisted via /api/config,
+  // same mechanism as disabledIds/deletedIds — no schema change needed).
+  const saveFeedEdit = ({ id, name, url }) => {
+    if (customFeeds.some(f=>f.id===id)) {
+      setCustomFeeds(p=>p.map(f=>f.id===id ? { ...f, name, url, xmlUrl:url } : f));
+      fetch("http://localhost:3001/api/feeds/custom/"+id, {
+        method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name, url }),
+      }).catch(e=>console.warn("Feed update failed:", e.message));
+    } else {
+      setFeedOverrides(p=>({ ...p, [id]: { name, url, xmlUrl:url } }));
+    }
+  };
+  const resetFeedOverride = id => setFeedOverrides(p=>{ const n={...p}; delete n[id]; return n; });
 
   const saveApiKey = (val) => {
     setApiKey(val); // state only — never written to storage
@@ -1073,6 +1174,128 @@ export default function App() {
     setLoading(false);
   };
 
+  // Fetch a saved report's full body + sourceMap, ask Claude to derive hunting
+  // hypotheses from it, resolve citations against that report's own sourceMap,
+  // and persist the result. Returns {ok:true} or {ok:false, error} — the
+  // caller (generateConsolidated) owns user-facing error messaging so a batch
+  // run can report one consolidated summary instead of overwriting itself
+  // per item. huntAuthMode picks how the Claude call is made: a pasted API
+  // key (metered, billed per token) or the local Claude Code CLI (subscription
+  // auth, no key).
+  const extractHypotheses = async (reportId) => {
+    setHuntBusy(reportId);
+    try {
+      const full = await fetch(`http://localhost:3001/api/reports/${reportId}`).then(r=>r.json());
+      if (full.error) throw new Error(full.error);
+      let smap = {};
+      try { smap = full.source_map ? JSON.parse(full.source_map) : {}; } catch(e) { /* empty */ }
+      const body = rebuildReferences(full.body || "", smap);
+      const prompt = buildHypothesisPrompt(body);
+
+      let text;
+      if (huntAuthMode === "subscription") {
+        const res = await fetch("http://localhost:3001/api/analyze-cli", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || res.statusText);
+        text = (data.content || []).map(b => b.text || "").join("");
+      } else {
+        const res = await fetch("http://localhost:3001/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey.trim() },
+          body: JSON.stringify({
+            model: currentModel.apiId,
+            max_tokens: Math.max(maxTokens, 2048),
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+        const data = await res.json();
+        text = (data.content || []).map(b => b.text || "").join("");
+      }
+
+      const rawHyps = parseHypothesisResponse(text);
+      const hypotheses = rawHyps.map(h => resolveHypothesisRefs(h, smap));
+
+      const save = await fetch(`http://localhost:3001/api/reports/${reportId}/hypotheses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hypotheses }),
+      }).then(r => r.json());
+      if (save.error) throw new Error(save.error);
+
+      setHypCounts(p => ({ ...p, [reportId]: save.count }));
+      return { ok: true };
+    } catch(e) {
+      return { ok: false, error: e.message };
+    } finally {
+      setHuntBusy(null);
+    }
+  };
+
+  const toggleHuntSelected = (id) => setHuntSelected(p => p.includes(id) ? p.filter(x=>x!==id) : [...p, id]);
+
+  // Single entry point for the Hunt tab: extracts hypotheses for any selected
+  // report that doesn't already have them (skips ones that do, unless the
+  // user opted into a forced re-extract), then opens the consolidated HTML
+  // for whichever selected reports ended up with hypotheses.
+  const generateConsolidated = async () => {
+    if (!huntSelected.length) return;
+    const needsExtraction = huntSelected.some(id => huntForceReextract || (hypCounts[id]||0) === 0);
+    if (needsExtraction && huntAuthMode === "apikey" && !apiKey.trim()) {
+      setHuntError("API key required to extract the selected reports that don't have hypotheses yet — add it in the CONFIG tab, or switch to Claude Subscription mode.");
+      return;
+    }
+    setHuntError("");
+    setHuntGenerating(true);
+    const failures = [];
+    for (const id of huntSelected) {
+      if ((hypCounts[id]||0) > 0 && !huntForceReextract) continue;
+      const result = await extractHypotheses(id);
+      if (!result.ok) failures.push({ id, error: result.error });
+    }
+    setHuntGenerating(false);
+
+    const readyIds = huntSelected.filter(id => !failures.some(f => f.id === id));
+    if (failures.length) {
+      setHuntError(`${failures.length} report${failures.length===1?"":"s"} failed to extract (${failures.map(f=>"#"+f.id).join(", ")}) — ${readyIds.length ? `continuing with the remaining ${readyIds.length}.` : "nothing left to generate."}`);
+    }
+    if (!readyIds.length) return;
+
+    // A plain <a> click is a real navigation (same-tab, since this always
+    // downloads rather than opening a page to view), not a JS popup, so it
+    // isn't subject to popup-blocker heuristics the way window.open() can be
+    // — same pattern already used by the History tab's bulk export.
+    const a = document.createElement("a");
+    a.href = `http://localhost:3001/api/hypotheses/consolidated?reportIds=${readyIds.join(",")}&theme=${huntTheme}`;
+    a.rel = "noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const toggleHistorySelected = (id) => setHistorySelected(p => p.includes(id) ? p.filter(x=>x!==id) : [...p, id]);
+
+  // Triggers one download per selected report in the chosen format. Downloads
+  // are staggered (not fired all in the same tick) so browsers don't treat
+  // them as a popup/download flood and block the later ones.
+  const exportSelectedHistory = () => {
+    historySelected.forEach((id, i) => {
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = `http://localhost:3001/api/reports/${id}/export?format=${historyExportFmt}`;
+        a.rel = "noreferrer";
+        if (historyExportFmt === "pdf") a.target = "_blank";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }, i * 250);
+    });
+  };
+
   // Parse inline text: bold **x**, inline-code `x`, and citations [N]
   const renderInline = (text, smap) => {
     // Split on **bold**, `code`, and [N] citation tokens
@@ -1185,11 +1408,13 @@ export default function App() {
     {id:"report",  label:"📋 REPORT"},
     {id:"cost",    label:"💰 COST & FORECAST"},
     {id:"history", label:"🗄 HISTORY"},
+    {id:"hunt",    label:"🎯 HUNT"},
   ];
 
   return (
     <div style={{minHeight:"100vh",background:"#060d14",color:"#c9d8e8",fontFamily:"IBM Plex Mono, Courier New, monospace"}}>
-      {showAddFeed && <CustomFeedForm onAdd={addCustomFeed} onClose={()=>setShowAddFeed(false)}/>}
+      {showAddFeed && <FeedForm onSave={addCustomFeed} onClose={()=>setShowAddFeed(false)}/>}
+      {editingFeed && <FeedForm initial={editingFeed} onSave={saveFeedEdit} onClose={()=>setEditingFeed(null)}/>}
 
       {/* ── Header ── */}
       <div style={{background:"linear-gradient(135deg,#0a1929 0%,#0d2137 50%,#091520 100%)",borderBottom:"1px solid #00ff9d33",padding:"1.2rem 2rem",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,boxShadow:"0 0 40px #00ff9d11"}}>
@@ -1383,6 +1608,20 @@ export default function App() {
                               {src.isCustom&&<span style={{marginRight:"0.3rem",fontSize:"0.58rem"}}>✦</span>}{src.name}
                             </button>
                             <button
+                              title="Edit feed name/URL"
+                              onClick={()=>setEditingFeed({id:src.id, name:src.name, url: src.url || src.xmlUrl || ""})}
+                              style={{padding:"0.35rem 0.4rem",background:"#0a1929",border:"1px solid #1a3a4a",borderLeft:"none",borderRight:"none",color:"#4a6a80",cursor:"pointer",fontSize:"0.6rem",fontFamily:"inherit",lineHeight:1}}>
+                              {"✎"}
+                            </button>
+                            {feedOverrides[src.id] && (
+                              <button
+                                title="Reset to default (undo edit)"
+                                onClick={()=>resetFeedOverride(src.id)}
+                                style={{padding:"0.35rem 0.4rem",background:"#0a1929",border:"1px solid #1a3a4a",borderLeft:"none",borderRight:"none",color:"#ffd700",cursor:"pointer",fontSize:"0.6rem",fontFamily:"inherit",lineHeight:1}}>
+                                {"↺"}
+                              </button>
+                            )}
+                            <button
                               title={isDisabled?"Enable feed":"Disable feed"}
                               onClick={()=>setDisabledIds(prev=>isDisabled?prev.filter(id=>id!==src.id):[...prev,src.id])}
                               style={{padding:"0.35rem 0.4rem",background:"#0a1929",border:`1px solid ${isDisabled?"#ef535055":"#1a3a4a"}`,borderLeft:"1px solid #1a2a3a",borderRight:"none",color:isDisabled?"#ef5350":"#2a4a5a",cursor:"pointer",fontSize:"0.6rem",fontFamily:"inherit",lineHeight:1}}>
@@ -1563,15 +1802,28 @@ export default function App() {
 
         {/* ── HISTORY ── */}
         {/* ── HISTORY ── */}
-        {activeTab==="history" && (
+        {activeTab==="history" && (() => {
+          const exportableIds = history
+            .filter(h => !h.saving && !h.saveFailed && h.id && h.id < 1e12)
+            .map(h => h.id);
+          const allSelected = exportableIds.length>0 && exportableIds.every(id=>historySelected.includes(id));
+          return (
           <div>
-            <div style={{color:"#4fc3f7",fontSize:"0.72rem",letterSpacing:"0.15em",marginBottom:"1.5rem"}}>{"◈ REPORT HISTORY ("}{history.length}{")"}</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
+              <div style={{color:"#4fc3f7",fontSize:"0.72rem",letterSpacing:"0.15em"}}>{"◈ REPORT HISTORY ("}{history.length}{")"}</div>
+              {exportableIds.length>0 && (
+                <div style={{display:"flex",gap:"0.4rem"}}>
+                  <button onClick={()=>setHistorySelected(allSelected?[]:exportableIds)} style={{padding:"0.3rem 0.6rem",background:"#00ff9d11",border:"1px solid #00ff9d33",color:"#00ff9d",borderRadius:"4px",cursor:"pointer",fontSize:"0.6rem",fontFamily:"inherit"}}>{allSelected?"NONE":"ALL"}</button>
+                </div>
+              )}
+            </div>
             {!history.length
               ? <div style={{textAlign:"center",padding:"3rem",color:"#4a6a80"}}>No reports yet.</div>
               : history.map(h=>{
                   const modelColor = (MODELS.find(function(m){return m.id===h.modelId;})||{color:"#4a6a80"}).color;
                   // dbId is valid once saving=false and id is a small integer (not a Date.now() timestamp)
                   const dbId = (!h.saving && !h.saveFailed && h.id && h.id < 1e12) ? h.id : null;
+                  const isSelected = dbId && historySelected.includes(dbId);
                   return (
                     <div key={h.id}
                       onClick={function(){
@@ -1590,9 +1842,13 @@ export default function App() {
                           setActiveTab("report");
                         }
                       }}
-                      style={{background:"#0a1929",border:"1px solid #1a3a4a",borderRadius:"6px",padding:"1rem 1.5rem",marginBottom:"0.8rem",cursor:"pointer"}}
+                      style={{background:"#0a1929",border:`1px solid ${isSelected?"#e879f9":"#1a3a4a"}`,borderRadius:"6px",padding:"1rem 1.5rem",marginBottom:"0.8rem",cursor:"pointer",display:"flex",gap:"1rem",alignItems:"flex-start"}}
                     >
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <input type="checkbox" checked={!!isSelected} disabled={!dbId}
+                        onClick={function(e){e.stopPropagation();}}
+                        onChange={()=>dbId && toggleHistorySelected(dbId)}
+                        style={{marginTop:"0.2rem",accentColor:"#e879f9",cursor:dbId?"pointer":"not-allowed",flexShrink:0}}/>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flex:1}}>
                         <div>
                           <div style={{color:"#c9d8e8",fontSize:"0.78rem"}}>
                             {h.timestamp}
@@ -1625,6 +1881,7 @@ export default function App() {
                                 fetch("http://localhost:3001/api/reports/"+h.id,{method:"DELETE"});
                                 setHistory(function(p){return p.filter(function(r){return r.id!==h.id;});});
                                 setCostLedger(function(p){return p.filter(function(r){return r.id!==h.id;});});
+                                setHistorySelected(function(p){return p.filter(function(id){return id!==h.id;});});
                               }}
                               style={{padding:"0.2rem 0.4rem",background:"#0a1929",border:"1px solid #ef535055",color:"#ef5350",borderRadius:"3px",fontSize:"0.58rem",cursor:"pointer",fontFamily:"inherit"}}>
                               {"✕"}
@@ -1636,9 +1893,158 @@ export default function App() {
                   );
                 })
             }
-          </div>
-        )}
 
+            {exportableIds.length>0 && (
+              <div style={{position:"sticky",bottom:0,marginTop:"1.5rem",padding:"1rem 1.5rem",background:"#0a1929",border:"1px solid #e879f933",borderRadius:"8px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"1rem"}}>
+                <div style={{color:"#4a6a80",fontSize:"0.68rem"}}>
+                  {historySelected.length ? `${historySelected.length} report${historySelected.length===1?"":"s"} selected` : "Select reports above to bulk-export."}
+                </div>
+                <div style={{display:"flex",gap:"1rem",alignItems:"center"}}>
+                  <div style={{display:"flex",gap:"0.4rem"}}>
+                    {["md","html","pdf","docx"].map(fmt=>(
+                      <button key={fmt} onClick={()=>setHistoryExportFmt(fmt)} style={{
+                        padding:"0.4rem 0.7rem",
+                        background:historyExportFmt===fmt?"#e879f918":"#060d14",
+                        border:`1px solid ${historyExportFmt===fmt?"#e879f9":"#1a3a4a"}`,
+                        color:historyExportFmt===fmt?"#e879f9":"#4a6a80",
+                        borderRadius:"5px",cursor:"pointer",fontFamily:"inherit",fontSize:"0.65rem",fontWeight:700,
+                      }}>{fmt.toUpperCase()}</button>
+                    ))}
+                  </div>
+                  <button onClick={exportSelectedHistory} disabled={!historySelected.length} style={{
+                    padding:"0.6rem 1.2rem",
+                    background:historySelected.length?"linear-gradient(135deg,#e879f922,#4fc3f722)":"#0a1929",
+                    border:`1px solid ${historySelected.length?"#e879f9":"#1a3a4a"}`,
+                    color:historySelected.length?"#e879f9":"#2a4a60",
+                    borderRadius:"6px",cursor:historySelected.length?"pointer":"not-allowed",
+                    fontSize:"0.75rem",fontFamily:"inherit",fontWeight:700,letterSpacing:"0.08em",
+                  }}>
+                    {`↓ EXPORT ${historySelected.length || ""} REPORT${historySelected.length===1?"":"S"}`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          );
+        })()}
+
+        {/* ── HUNT ── */}
+        {activeTab==="hunt" && (() => {
+          const extractable = history.filter(h => !h.saving && !h.saveFailed && h.id && h.id < 1e12);
+          return (
+            <div>
+              <div style={{color:"#4fc3f7",fontSize:"0.72rem",letterSpacing:"0.15em",marginBottom:"0.6rem"}}>
+                {"◈ HUNTING HYPOTHESES"}
+              </div>
+              <div style={{color:"#4a6a80",fontSize:"0.68rem",marginBottom:"1.2rem",lineHeight:1.6}}>
+                Select saved reports below, then generate one consolidated interactive HTML dashboard — hypotheses are extracted automatically for any report that doesn't have them yet.
+              </div>
+
+              {/* Auth mode toggle */}
+              <div style={{marginBottom:"1.2rem"}}>
+                <div style={{color:"#4fc3f7",fontSize:"0.68rem",letterSpacing:"0.15em",marginBottom:"0.5rem"}}>◈ AUTH MODE</div>
+                <div style={{display:"flex",gap:"0.5rem"}}>
+                  {[
+                    {id:"apikey",       label:"API KEY",             sub:"metered · uses CONFIG key"},
+                    {id:"subscription", label:"CLAUDE SUBSCRIPTION", sub:"local claude CLI · no key"},
+                  ].map(m=>(
+                    <button key={m.id} onClick={()=>setHuntAuthMode(m.id)} style={{
+                      padding:"0.5rem 0.9rem",textAlign:"left",
+                      background:huntAuthMode===m.id?"#e879f918":"#0a1929",
+                      border:`1px solid ${huntAuthMode===m.id?"#e879f9":"#1a3a4a"}`,
+                      borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",
+                    }}>
+                      <div style={{color:huntAuthMode===m.id?"#e879f9":"#4a6a80",fontSize:"0.68rem",fontWeight:700}}>{m.label}</div>
+                      <div style={{color:"#2a4a60",fontSize:"0.58rem",marginTop:"0.15rem"}}>{m.sub}</div>
+                    </button>
+                  ))}
+                </div>
+                {huntAuthMode==="subscription" && (
+                  <div style={{marginTop:"0.6rem",color:"#4a6a80",fontSize:"0.62rem",lineHeight:1.5}}>
+                    Runs the <code style={{background:"#0d2137",color:"#00ff9d",padding:"0.05em 0.35em",borderRadius:"3px"}}>claude</code> CLI on the machine running server.js — requires it installed and logged in (<code style={{background:"#0d2137",color:"#00ff9d",padding:"0.05em 0.35em",borderRadius:"3px"}}>claude login</code>) with a Claude Pro/Max subscription. No per-token cost is tracked for this mode.
+                  </div>
+                )}
+              </div>
+
+              {huntError && <div style={{color:"#ef5350",fontSize:"0.72rem",marginBottom:"1rem",padding:"0.5rem",background:"#ef535011",border:"1px solid #ef535033",borderRadius:"4px"}}>{"⚠"} {huntError}</div>}
+              {huntAuthMode==="apikey" && !apiKey.trim() && <div style={{color:"#ffd700",fontSize:"0.68rem",marginBottom:"1rem",padding:"0.5rem 0.8rem",background:"#ffd70011",border:"1px solid #ffd70033",borderRadius:"4px"}}>{"⚠ API key required to extract hypotheses — add it in the CONFIG tab, or switch to Claude Subscription mode above."}</div>}
+
+              {!extractable.length
+                ? <div style={{textAlign:"center",padding:"3rem",color:"#4a6a80"}}>No saved reports yet — generate a briefing first.</div>
+                : extractable.map(h => {
+                    const count = hypCounts[h.id] || 0;
+                    const isBusyNow = huntBusy === h.id;
+                    const isSelected = huntSelected.includes(h.id);
+                    return (
+                      <div key={h.id} style={{background:"#0a1929",border:`1px solid ${isSelected?"#e879f9":"#1a3a4a"}`,borderRadius:"6px",padding:"1rem 1.5rem",marginBottom:"0.8rem"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"1rem"}}>
+                          <label style={{display:"flex",alignItems:"flex-start",gap:"0.7rem",cursor:"pointer",flex:1}}>
+                            <input type="checkbox" checked={isSelected}
+                              onChange={()=>toggleHuntSelected(h.id)}
+                              style={{marginTop:"0.2rem",accentColor:"#e879f9",cursor:"pointer"}}/>
+                            <div>
+                              <div style={{color:"#c9d8e8",fontSize:"0.78rem"}}>
+                                {h.timestamp}
+                                <span style={{color:(MODELS.find(m=>m.id===h.modelId)||{color:"#4a6a80"}).color,fontSize:"0.65rem"}}>{" · "}{h.modelName}</span>
+                              </div>
+                              <div style={{color:"#4a6a80",fontSize:"0.65rem",marginTop:"0.2rem"}}>{h.query}</div>
+                              <div style={{color:"#4fc3f7",fontSize:"0.6rem",marginTop:"0.1rem"}}>{"Window: "}{fmtDate(h.dateFrom)}{" → "}{fmtDate(h.dateTo)}</div>
+                            </div>
+                          </label>
+                          <div style={{flexShrink:0}}>
+                            {isBusyNow
+                              ? <span style={{padding:"0.25rem 0.6rem",background:"#e879f911",border:"1px solid #e879f944",color:"#e879f9",borderRadius:"4px",fontSize:"0.65rem",whiteSpace:"nowrap"}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{" EXTRACTING…"}</span>
+                              : count>0
+                                ? <span style={{padding:"0.25rem 0.6rem",background:"#00ff9d11",border:"1px solid #00ff9d33",color:"#00ff9d",borderRadius:"4px",fontSize:"0.65rem",whiteSpace:"nowrap"}}>{"✓ "}{count}{" hypotheses"}</span>
+                                : <span style={{padding:"0.25rem 0.6rem",background:"#0a1929",border:"1px solid #1a3a4a",color:"#2a4a60",borderRadius:"4px",fontSize:"0.65rem",whiteSpace:"nowrap"}}>not yet extracted</span>
+                            }
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+              }
+
+              <div style={{position:"sticky",bottom:0,marginTop:"1.5rem",padding:"1rem 1.5rem",background:"#0a1929",border:"1px solid #e879f933",borderRadius:"8px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"1rem"}}>
+                <div style={{color:"#4a6a80",fontSize:"0.68rem"}}>
+                  {huntSelected.length
+                    ? `${huntSelected.length} report${huntSelected.length===1?"":"s"} selected`
+                    : "Select reports above, then generate."}
+                </div>
+                <div style={{display:"flex",gap:"1rem",alignItems:"center",flexWrap:"wrap"}}>
+                  <label style={{display:"flex",alignItems:"center",gap:"0.4rem",cursor:"pointer",fontSize:"0.6rem",color:"#4a6a80",whiteSpace:"nowrap"}}>
+                    <input type="checkbox" checked={huntForceReextract} onChange={()=>setHuntForceReextract(p=>!p)} style={{accentColor:"#e879f9",cursor:"pointer"}}/>
+                    re-extract already processed
+                  </label>
+                  <div style={{display:"flex",gap:"0.3rem"}}>
+                    {[{id:"light",label:"☀ LIGHT"},{id:"dark",label:"🌙 DARK"}].map(t=>(
+                      <button key={t.id} onClick={()=>setHuntTheme(t.id)} style={{
+                        padding:"0.4rem 0.7rem",
+                        background:huntTheme===t.id?"#e879f918":"#060d14",
+                        border:`1px solid ${huntTheme===t.id?"#e879f9":"#1a3a4a"}`,
+                        color:huntTheme===t.id?"#e879f9":"#4a6a80",
+                        borderRadius:"5px",cursor:"pointer",fontFamily:"inherit",fontSize:"0.6rem",fontWeight:700,
+                      }}>{t.label}</button>
+                    ))}
+                  </div>
+                  <button onClick={generateConsolidated} disabled={!huntSelected.length || huntGenerating} style={{
+                    padding:"0.6rem 1.2rem",
+                    background:(!huntSelected.length||huntGenerating)?"#0a1929":"linear-gradient(135deg,#e879f922,#4fc3f722)",
+                    border:`1px solid ${(!huntSelected.length||huntGenerating)?"#1a3a4a":"#e879f9"}`,
+                    color:(!huntSelected.length||huntGenerating)?"#2a4a60":"#e879f9",
+                    borderRadius:"6px",cursor:(!huntSelected.length||huntGenerating)?"not-allowed":"pointer",
+                    fontSize:"0.75rem",fontFamily:"inherit",fontWeight:700,letterSpacing:"0.08em",
+                    display:"flex",alignItems:"center",gap:"0.4rem",whiteSpace:"nowrap",
+                  }}>
+                    {huntGenerating
+                      ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{"GENERATING…"}</>
+                      : "⚡ GENERATE CONSOLIDATED HTML"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       </div>
 
